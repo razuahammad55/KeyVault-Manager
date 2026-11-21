@@ -1,166 +1,214 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
+/**
+ * Client portal. Provided variables: $public, $slug, $user, $licenses,
+ * $acts_map, $tab, $total_licenses, $total_slots, $active_activations.
+ */
 
-$public = KeyVault_Manager_Public::get_instance();
-$slug = KVM_SLUG;
 $msg_param = $slug . '_msg';
 $err_param = $slug . '_err';
-$pass_action = $slug . '_change_pass_action';
-$pass_nonce = $slug . '_change_pass_nonce';
-$old_pass_name = $slug . '_old_password';
-$new_pass_name = $slug . '_new_password';
-$confirm_pass_name = $slug . '_confirm_password';
-$submit_pass_name = $slug . '_submit_change_pass';
+$tab_param = $slug . '_tab';
+$pass_action  = $slug . '_change_pass_action';
+$pass_nonce   = $slug . '_change_pass_nonce';
+
+$notices = array();
+if (isset($_GET[$msg_param])) {
+    $msgs = array(
+        'pass_changed'    => '✅ Security password updated successfully!',
+        'domain_unlinked' => '✅ Domain unlinked successfully.',
+        'logged_out'      => '✅ You have been signed out.',
+    );
+    $m = sanitize_key(wp_unslash($_GET[$msg_param]));
+    if (isset($msgs[$m])) $notices[] = array('success', $msgs[$m]);
+}
+if (isset($_GET[$err_param])) {
+    $errs = array(
+        'pass_mismatch' => '❌ Passwords did not match or the current password was incorrect.',
+        'not_permitted' => '❌ You are not allowed to manage that domain.',
+    );
+    $e = sanitize_key(wp_unslash($_GET[$err_param]));
+    if (isset($errs[$e])) $notices[] = array('error', $errs[$e]);
+}
+
+$nav_items = array(
+    'dashboard' => array('📊', 'Dashboard'),
+    'licenses'  => array('🔑', 'License Portfolio'),
+    'downloads' => array('📥', 'Plugin Downloads'),
+    'profile'   => array('👤', 'Account Details'),
+    'security'  => array('🛡️', 'Password & Security'),
+);
+$logout_url = wp_nonce_url($public->get_url(array('action' => 'logout')), $slug . '_logout');
 ?>
-<div class="kvm-wrap" style="max-width:1240px; margin:40px auto; background:#f8fafc; border-radius:24px; padding:30px; border:1px solid #e2e8f0;">
-    <div style="display:grid; grid-template-columns: 260px 1fr; gap:30px;">
-        
-        <div class="kvm-card" style="padding:25px; height:fit-content;">
-            <div style="text-align:center; border-bottom:1px solid #f1f5f9; padding-bottom:20px; margin-bottom:20px;">
-                <div style="width:60px; height:60px; background:#eff6ff; color:#2563eb; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:24px; font-weight:800; margin:0 auto 12px auto;">
-                    <?php echo strtoupper(substr($user->name, 0, 1)); ?>
-                </div>
-                <strong style="color:#0f172a; font-size:16px; display:block;"><?php echo esc_html($user->name); ?></strong>
-                <span style="color:#64748b; font-size:13px;"><?php echo esc_html($user->email); ?></span>
+<div class="kvm-wrap kvm-portal">
+    <div class="kvm-portal-layout">
+
+        <aside class="kvm-card kvm-side">
+            <div class="kvm-side-head">
+                <div class="kvm-avatar"><?php echo esc_html(strtoupper(substr(trim($user->name), 0, 1))); ?></div>
+                <strong class="kvm-side-name"><?php echo esc_html($user->name); ?></strong>
+                <span class="kvm-side-mail"><?php echo esc_html($user->email); ?></span>
             </div>
-
-            <nav style="display:flex; flex-direction:column; gap:6px;">
-                <a href="<?php echo esc_url($public->get_url(array('tab' => 'dashboard'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; <?php echo $tab === 'dashboard' ? 'background:#2563eb; color:#ffffff;' : 'color:#475569; background:transparent;'; ?>">📊 Dashboard</a>
-                <a href="<?php echo esc_url($public->get_url(array('tab' => 'licenses'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; <?php echo $tab === 'licenses' ? 'background:#2563eb; color:#ffffff;' : 'color:#475569; background:transparent;'; ?>">🔑 License Portfolio</a>
-                <a href="<?php echo esc_url($public->get_url(array('tab' => 'downloads'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; <?php echo $tab === 'downloads' ? 'background:#2563eb; color:#ffffff;' : 'color:#475569; background:transparent;'; ?>">📥 Plugin Downloads</a>
-                <a href="<?php echo esc_url($public->get_url(array('tab' => 'profile'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; <?php echo $tab === 'profile' ? 'background:#2563eb; color:#ffffff;' : 'color:#475569; background:transparent;'; ?>">👤 Account Details</a>
-                <a href="<?php echo esc_url($public->get_url(array('tab' => 'security'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; <?php echo $tab === 'security' ? 'background:#2563eb; color:#ffffff;' : 'color:#475569; background:transparent;'; ?>">🛡️ Security Password</a>
-                <a href="<?php echo esc_url($public->get_url(array('action' => 'logout'))); ?>" style="padding:12px 16px; border-radius:10px; font-weight:700; font-size:14px; text-decoration:none; display:flex; align-items:center; gap:10px; color:#ef4444; margin-top:10px;">🚪 Sign Out</a>
+            <nav class="kvm-side-nav">
+                <?php foreach ($nav_items as $key => $item) : ?>
+                    <a class="kvm-nav-item<?php echo $tab === $key ? ' is-active' : ''; ?>" href="<?php echo esc_url($public->get_url(array('tab' => $key))); ?>">
+                        <span aria-hidden="true"><?php echo $item[0]; ?></span><?php echo esc_html($item[1]); ?>
+                    </a>
+                <?php endforeach; ?>
+                <a class="kvm-nav-item kvm-nav-item--danger" href="<?php echo esc_url($logout_url); ?>">
+                    <span aria-hidden="true">🚪</span>Sign Out
+                </a>
             </nav>
-        </div>
+        </aside>
 
-        <div class="kvm-card" style="padding:35px;">
-            <?php if (isset($_GET[$msg_param]) && $_GET[$msg_param] === 'pass_changed') : ?>
-                <div style="background:#dcfce7; border:1px solid #86efac; color:#166534; padding:15px; border-radius:12px; margin-bottom:25px; font-weight:700;">✅ Security password updated successfully!</div>
-            <?php endif; ?>
-
-            <?php if (isset($_GET[$err_param]) && $_GET[$err_param] === 'pass_mismatch') : ?>
-                <div style="background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:15px; border-radius:12px; margin-bottom:25px; font-weight:700;">❌ Passwords did not match or current password was incorrect.</div>
-            <?php endif; ?>
+        <main class="kvm-card kvm-portal-main">
+            <?php foreach ($notices as $notice) : ?>
+                <div class="kvm-alert kvm-alert--<?php echo esc_attr($notice[0]); ?>"><?php echo esc_html($notice[1]); ?></div>
+            <?php endforeach; ?>
 
             <?php if ($tab === 'dashboard') : ?>
-                <h2 style="margin:0 0 8px 0; font-size:24px; font-weight:800; color:#0f172a;">Account Overview</h2>
-                <p style="color:#64748b; font-size:15px; margin-bottom:30px;">From your account dashboard you can view your <a href="<?php echo esc_url($public->get_url(array('tab' => 'licenses'))); ?>" style="color:#2563eb; font-weight:700;">recent license keys</a>, manage <a href="<?php echo esc_url($public->get_url(array('tab' => 'security'))); ?>" style="color:#2563eb; font-weight:700;">password security</a>, and download <a href="<?php echo esc_url($public->get_url(array('tab' => 'downloads'))); ?>" style="color:#2563eb; font-weight:700;">client software packages</a>.</p>
+                <h2 class="kvm-page-title">Account Overview</h2>
+                <p class="kvm-page-sub">Manage your licenses, linked websites, downloads and account security.</p>
 
-                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:20px; margin-bottom:35px;">
-                    <div style="background:#f8fafc; border:1.5px solid #e2e8f0; padding:22px; border-radius:14px;">
-                        <span style="font-size:12px; font-weight:800; color:#64748b; text-transform:uppercase;">Licenses</span>
-                        <h3 style="font-size:30px; font-weight:900; color:#0f172a; margin:8px 0 0 0;"><?php echo $total_licenses; ?></h3>
+                <div class="kvm-stat-grid">
+                    <div class="kvm-stat-tile">
+                        <span class="kvm-stat-label">Licenses</span>
+                        <h3 class="kvm-stat-value"><?php echo intval($total_licenses); ?></h3>
                     </div>
-                    <div style="background:#f8fafc; border:1.5px solid #e2e8f0; padding:22px; border-radius:14px;">
-                        <span style="font-size:12px; font-weight:800; color:#64748b; text-transform:uppercase;">Connected Sites</span>
-                        <h3 style="font-size:30px; font-weight:900; color:#2563eb; margin:8px 0 0 0;"><?php echo $active_activations; ?> / <?php echo $total_slots; ?></h3>
+                    <div class="kvm-stat-tile">
+                        <span class="kvm-stat-label">Connected Sites</span>
+                        <h3 class="kvm-stat-value kvm-accent"><?php echo intval($active_activations); ?> / <?php echo intval($total_slots); ?></h3>
                     </div>
-                    <div style="background:#f8fafc; border:1.5px solid #e2e8f0; padding:22px; border-radius:14px;">
-                        <span style="font-size:12px; font-weight:800; color:#64748b; text-transform:uppercase;">Account Status</span>
-                        <h3 style="font-size:22px; font-weight:800; color:#10b981; margin:8px 0 0 0;">Active Account</h3>
+                    <div class="kvm-stat-tile">
+                        <span class="kvm-stat-label">Account Status</span>
+                        <h3 class="kvm-stat-value kvm-good">Active</h3>
                     </div>
+                </div>
+
+                <div class="kvm-panel kvm-panel--soft">
+                    <strong>Quick actions</strong>
+                    <p class="kvm-muted">View <a href="<?php echo esc_url($public->get_url(array('tab' => 'licenses'))); ?>">recent license keys</a>, update your <a href="<?php echo esc_url($public->get_url(array('tab' => 'security'))); ?>">password</a>, or grab the latest <a href="<?php echo esc_url($public->get_url(array('tab' => 'downloads'))); ?>">client software package</a>.</p>
                 </div>
 
             <?php elseif ($tab === 'profile') : ?>
-                <h2 style="margin:0 0 8px 0; font-size:24px; font-weight:800; color:#0f172a;">Account Details</h2>
-                <div style="background:#f8fafc; border:1.5px solid #e2e8f0; border-radius:16px; padding:25px; max-width:540px;">
-                    <div style="margin-bottom:20px; border-bottom:1px solid #e2e8f0; padding-bottom:15px;">
-                        <span style="font-size:12px; font-weight:800; color:#64748b; text-transform:uppercase; display:block; margin-bottom:4px;">Full Name</span>
-                        <strong style="font-size:18px; color:#0f172a;"><?php echo esc_html($user->name); ?></strong>
+                <h2 class="kvm-page-title">Account Details</h2>
+                <div class="kvm-panel kvm-panel--soft kvm-profile">
+                    <div class="kvm-profile-row">
+                        <span class="kvm-stat-label">Full Name</span>
+                        <strong><?php echo esc_html($user->name); ?></strong>
                     </div>
-                    <div style="margin-bottom:20px; border-bottom:1px solid #e2e8f0; padding-bottom:15px;">
-                        <span style="font-size:12px; font-weight:800; color:#64748b; text-transform:uppercase; display:block; margin-bottom:4px;">Email Address</span>
-                        <strong style="font-size:18px; color:#0f172a;"><?php echo esc_html($user->email); ?></strong>
+                    <div class="kvm-profile-row">
+                        <span class="kvm-stat-label">Email Address</span>
+                        <strong><?php echo esc_html($user->email); ?></strong>
                     </div>
                 </div>
 
             <?php elseif ($tab === 'security') : ?>
-                <h2 style="margin:0 0 8px 0; font-size:24px; font-weight:800; color:#0f172a;">Password & Security</h2>
-                <form method="post" style="max-width:500px;">
+                <h2 class="kvm-page-title">Password &amp; Security</h2>
+                <p class="kvm-page-sub">Choose a strong password with at least 8 characters.</p>
+                <form method="post" class="kvm-form kvm-form--stack">
                     <?php wp_nonce_field($pass_action, $pass_nonce); ?>
-                    <div style="margin-bottom:20px;">
-                        <label style="font-weight:700; display:block; margin-bottom:8px; color:#334155; font-size:14px;">Current Password</label>
-                        <input type="password" name="<?php echo esc_attr($old_pass_name); ?>" class="kvm-input" required>
+                    <div class="kvm-field">
+                        <label class="kvm-label">Current Password</label>
+                        <input type="password" name="<?php echo esc_attr($slug . '_old_password'); ?>" class="kvm-input" required autocomplete="current-password">
                     </div>
-                    <div style="margin-bottom:20px;">
-                        <label style="font-weight:700; display:block; margin-bottom:8px; color:#334155; font-size:14px;">New Password</label>
-                        <input type="password" name="<?php echo esc_attr($new_pass_name); ?>" class="kvm-input" required>
+                    <div class="kvm-field">
+                        <label class="kvm-label">New Password</label>
+                        <input type="password" name="<?php echo esc_attr($slug . '_new_password'); ?>" class="kvm-input" minlength="8" required autocomplete="new-password">
                     </div>
-                    <div style="margin-bottom:25px;">
-                        <label style="font-weight:700; display:block; margin-bottom:8px; color:#334155; font-size:14px;">Confirm New Password</label>
-                        <input type="password" name="<?php echo esc_attr($confirm_pass_name); ?>" class="kvm-input" required>
+                    <div class="kvm-field">
+                        <label class="kvm-label">Confirm New Password</label>
+                        <input type="password" name="<?php echo esc_attr($slug . '_confirm_password'); ?>" class="kvm-input" minlength="8" required autocomplete="new-password">
                     </div>
-                    <button type="submit" name="<?php echo esc_attr($submit_pass_name); ?>" class="kvm-btn" style="width:auto; padding:14px 28px;">Save Password Changes</button>
+                    <div><button type="submit" name="<?php echo esc_attr($slug . '_submit_change_pass'); ?>" class="kvm-btn kvm-btn--primary">Save Password Changes</button></div>
                 </form>
 
             <?php elseif ($tab === 'downloads') : ?>
-                <h2 style="margin:0 0 8px 0; font-size:24px; font-weight:800; color:#0f172a;">Client Plugin Downloads</h2>
-                <?php if (!empty($licenses)) : 
-                    $first_key = $licenses[0]->license_key;
-                    $namespace = defined('KVM_REST_NAMESPACE') ? KVM_REST_NAMESPACE : get_option($slug . '_rest_namespace', $slug . '/v1');
+                <h2 class="kvm-page-title">Client Plugin Downloads</h2>
+                <?php if (empty($licenses)) : ?>
+                    <div class="kvm-empty">
+                        <div class="kvm-empty-icon">📦</div>
+                        <p>No licenses are attached to your account yet — downloads unlock with your first license key.</p>
+                    </div>
+                <?php else :
+                    $first_key = '';
+                    foreach ($licenses as $lic) {
+                        if ($lic->status === 'active') { $first_key = $lic->license_key; break; }
+                    }
+                    if ($first_key === '') { $first_key = $licenses[0]->license_key; }
+                    $namespace = defined('KVM_REST_NAMESPACE') ? KVM_REST_NAMESPACE : $slug . '/v1';
                     $dl_link = site_url('/wp-json/' . $namespace . '/download-update?key=' . urlencode($first_key));
                     ?>
-                    <div style="background:#f8fafc; border:1.5px solid #e2e8f0; border-radius:16px; padding:30px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:20px;">
+                    <div class="kvm-panel kvm-panel--soft kvm-download-row">
                         <div>
-                            <strong style="font-size:18px; color:#0f172a; display:block;"><?php echo ucwords($slug); ?> Optimization Engine v1.0.2</strong>
-                            <span style="color:#64748b; font-size:14px;">Official client plugin package</span>
+                            <strong class="kvm-download-title"><?php echo esc_html(ucwords($slug)); ?> Optimization Engine</strong>
+                            <span class="kvm-muted">Official client plugin package — latest licensed build.</span>
                         </div>
-                        <a href="<?php echo esc_url($dl_link); ?>" style="background:#10b981; color:#ffffff; padding:14px 26px; border-radius:12px; font-weight:800; font-size:15px; text-decoration:none;">Download ZIP &darr;</a>
+                        <a href="<?php echo esc_url($dl_link); ?>" class="kvm-btn kvm-btn--success">Download ZIP &darr;</a>
                     </div>
                 <?php endif; ?>
 
-            <?php else : ?>
-                <h2 style="margin:0 0 8px 0; font-size:24px; font-weight:800; color:#0f172a;">License Keys & Orders</h2>
+            <?php else : /* licenses */ ?>
+                <h2 class="kvm-page-title">License Keys &amp; Orders</h2>
                 <?php if (empty($licenses)) : ?>
-                    <p style="color:#64748b;">No active licenses registered to your account.</p>
+                    <div class="kvm-empty">
+                        <div class="kvm-empty-icon">🔑</div>
+                        <p>No active licenses are registered to your account.</p>
+                    </div>
                 <?php else : ?>
-                    <?php foreach ($licenses as $lic) : 
-                        $acts = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$wpdb->prefix}{$slug}_activations WHERE license_id = %d", $lic->id));
-                        $plan_tier = isset($lic->plan_tier) ? $lic->plan_tier : 'Starter';
-                        $license_mode = isset($lic->license_mode) ? $lic->license_mode : 'multi';
-                        $tier_color = ($plan_tier === 'Enterprise') ? '#d97706' : (($plan_tier === 'Professional') ? '#9333ea' : '#2563eb');
-                        $exp_str = empty($lic->expires_at) ? 'Lifetime' : 'Expires: ' . esc_html($lic->expires_at);
+                    <?php foreach ($licenses as $lic) :
+                        $acts_count  = isset($acts_map[intval($lic->id)]) ? $acts_map[intval($lic->id)] : 0;
+                        $activations = $wpdb->get_results($wpdb->prepare(
+                            "SELECT * FROM " . KeyVault_Manager_DB::table('activations') . " WHERE license_id = %d ORDER BY id ASC",
+                            intval($lic->id)
+                        ));
+                        $plan_tier   = isset($lic->plan_tier) ? sanitize_text_field($lic->plan_tier) : 'Starter';
+                        $license_mode = isset($lic->license_mode) ? sanitize_text_field($lic->license_mode) : 'multi';
+                        $is_expired  = (!empty($lic->expires_at) && strtotime($lic->expires_at) < strtotime(current_time('mysql')));
                         ?>
-                        <div style="background:#f8fafc; border:1.5px solid #e2e8f0; padding:25px; border-radius:16px; margin-bottom:22px;">
-                            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-                                <div>
-                                    <span style="background:<?php echo $tier_color; ?>; color:#ffffff; padding:4px 12px; border-radius:6px; font-size:11px; font-weight:800; text-transform:uppercase;"><?php echo esc_html($plan_tier); ?> Plan</span>
-                                    <span style="background:#e2e8f0; color:#334155; padding:4px 12px; border-radius:6px; font-size:11px; font-weight:800; margin-left:8px; text-transform:uppercase;"><?php echo strtoupper($license_mode); ?> MODE</span>
-                                    <span style="background:#dcfce7; color:#15803d; padding:4px 12px; border-radius:6px; font-size:11px; font-weight:800; margin-left:8px; text-transform:uppercase;"><?php echo $exp_str; ?></span>
-                                </div>
-                                <div style="font-size:14px; color:#475569; font-weight:600;">
-                                    Quota Used: <strong style="color:#0f172a;"><?php echo count($acts); ?> / <?php echo esc_html($lic->max_activations); ?></strong>
-                                </div>
-                            </div>
-
-                            <div style="margin-top:18px; display:flex; align-items:center; gap:12px; background:#ffffff; border:1.5px solid #cbd5e1; padding:14px 18px; border-radius:12px;">
-                                <code style="font-size:16px; font-weight:800; color:#0f172a; flex-grow:1; letter-spacing:0.5px;"><?php echo esc_html($lic->license_key); ?></code>
-                                <button type="button" class="kvm-copy-btn" data-clipboard="<?php echo esc_attr($lic->license_key); ?>" style="background:#2563eb; color:#ffffff; border:none; padding:8px 16px; border-radius:8px; font-weight:800; cursor:pointer; font-size:13px;">Copy Key</button>
-                            </div>
-
-                            <div style="margin-top:18px;">
-                                <strong style="font-size:13px; color:#334155; display:block; margin-bottom:8px;">Connected Websites:</strong>
-                                <div>
-                                    <?php if (empty($acts)) : ?>
-                                        <em style="color:#94a3b8; font-size:13px;">No websites linked yet. Activate inside your WordPress plugin.</em>
+                        <div class="kvm-license-card">
+                            <div class="kvm-license-head">
+                                <div class="kvm-badge-row">
+                                    <span class="kvm-badge kvm-badge--<?php echo esc_attr(strtolower($plan_tier)); ?>"><?php echo esc_html($plan_tier); ?> Plan</span>
+                                    <span class="kvm-badge kvm-badge--plain"><?php echo esc_html(strtoupper($license_mode)); ?> MODE</span>
+                                    <?php if (empty($lic->expires_at)) : ?>
+                                        <span class="kvm-pill kvm-pill--lifetime">Lifetime</span>
+                                    <?php elseif ($is_expired) : ?>
+                                        <span class="kvm-pill kvm-pill--expired">Expired <?php echo esc_html(date('M d, Y', strtotime($lic->expires_at))); ?></span>
                                     <?php else : ?>
-                                        <?php foreach ($acts as $a) : 
-                                            $unlink_url = wp_nonce_url($public->get_url(array('action' => 'unlink_user', 'act_id' => $a->id)), $slug . '_unlink_user_' . $a->id);
-                                            ?>
-                                            <div style="display:inline-flex; align-items:center; background:#ffffff; border:1.5px solid #cbd5e1; padding:6px 14px; border-radius:8px; margin-right:10px; margin-bottom:8px; font-size:13px;">
-                                                <span style="font-weight:700; color:#0f172a; margin-right:8px;"><?php echo esc_html($a->domain); ?></span>
-                                                <a href="<?php echo esc_url($unlink_url); ?>" style="color:#ef4444; font-weight:800; text-decoration:none;" onclick="return confirm('Unlink this domain?');">&times; Unlink</a>
-                                            </div>
-                                        <?php endforeach; ?>
+                                        <span class="kvm-pill kvm-pill--ok">Expires <?php echo esc_html(date('M d, Y', strtotime($lic->expires_at))); ?></span>
+                                    <?php endif; ?>
+                                    <?php if ($lic->status !== 'active') : ?>
+                                        <span class="kvm-pill kvm-pill--expired"><?php echo esc_html(strtoupper($lic->status)); ?></span>
                                     <?php endif; ?>
                                 </div>
+                                <div class="kvm-quota">Quota used: <strong><?php echo intval($acts_count); ?> / <?php echo intval($lic->max_activations); ?></strong></div>
+                            </div>
+
+                            <div class="kvm-keyrow">
+                                <code class="kvm-key"><?php echo esc_html($lic->license_key); ?></code>
+                                <button type="button" class="kvm-btn kvm-btn--small kvm-copy-btn" data-kvm-copy="<?php echo esc_attr($lic->license_key); ?>">Copy Key</button>
+                            </div>
+
+                            <div class="kvm-domains">
+                                <strong class="kvm-domains-title">Connected Websites</strong>
+                                <?php if (empty($activations)) : ?>
+                                    <em class="kvm-muted">No websites linked yet. Activate inside your WordPress plugin.</em>
+                                <?php else : ?>
+                                    <?php foreach ($activations as $a) :
+                                        $unlink_url = wp_nonce_url($public->get_url(array('action' => 'unlink_user', 'act_id' => $a->id)), $slug . '_unlink_user_' . $a->id);
+                                        ?>
+                                        <span class="kvm-chip">
+                                            <span class="kvm-chip-domain"><?php echo esc_html($a->domain); ?></span>
+                                            <a href="<?php echo esc_url($unlink_url); ?>" class="kvm-chip-unlink" onclick="return confirm('Unlink this domain?');">&times; Unlink</a>
+                                        </span>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
                             </div>
                         </div>
                     <?php endforeach; ?>
                 <?php endif; ?>
             <?php endif; ?>
-        </div>
+        </main>
 
     </div>
 </div>

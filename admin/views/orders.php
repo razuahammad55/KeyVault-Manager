@@ -1,69 +1,73 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
-
 global $wpdb;
-$slug = KVM_SLUG;
-$table_orders = $wpdb->prefix . $slug . '_orders';
 
-// Fetch all recorded orders
-$orders = $wpdb->get_results("SELECT * FROM {$table_orders} ORDER BY id DESC");
+$table_orders = KeyVault_Manager_DB::table('orders');
 
-// Calculate Metrics & Revenue Breakdown
-$total_orders = count($orders);
-$total_revenue = 0;
-$stripe_revenue = 0;
-$paypal_revenue = 0;
+$search_order  = isset($_GET['os']) ? sanitize_text_field(wp_unslash($_GET['os'])) : '';
+$current_page  = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+$per_page      = 20;
+$offset        = ($current_page - 1) * $per_page;
 
-foreach ($orders as $o) {
-    $amt = floatval($o->amount);
-    $total_revenue += $amt;
-    if (stripos($o->gateway, 'stripe') !== false) {
-        $stripe_revenue += $amt;
-    } else {
-        $paypal_revenue += $amt;
-    }
+$search_clause = '';
+$search_args   = array();
+if (!empty($search_order)) {
+    $like = '%' . $wpdb->esc_like($search_order) . '%';
+    $search_clause = 'WHERE order_id LIKE %s OR customer_email LIKE %s OR customer_name LIKE %s';
+    $search_args   = array($like, $like, $like);
 }
+
+// Aggregates computed in SQL, not PHP.
+$total_orders = intval($wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $table_orders $search_clause", $search_args)));
+$total_revenue = floatval($wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(amount), 0) FROM $table_orders $search_clause", $search_args)));
+$stripe_revenue = floatval($wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(amount), 0) FROM $table_orders WHERE gateway LIKE %s $search_clause", array_merge(array('%stripe%'), $search_args))));
+$paypal_revenue = max(0.0, $total_revenue - $stripe_revenue);
+
+$total_pages = max(1, (int) ceil($total_orders / $per_page));
+
+$query_args = array_merge($search_args, array($per_page, $offset));
+$orders = $wpdb->get_results($wpdb->prepare(
+    "SELECT * FROM $table_orders $search_clause ORDER BY id DESC LIMIT %d OFFSET %d",
+    $query_args
+));
 ?>
 
-
-<!-- Compact Orders Summary Header -->
-<div class="kvm-card-panel top-margin" style="margin-bottom: 20px; padding: 15px 20px;">
-    <div style="display: grid; grid-template-columns: 1fr 1.5fr 2fr; gap: 15px; align-items: center;">
-        
-        <!-- Total Orders Box -->
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 15px; text-align: center;">
-            <span style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Orders</span>
-            <div style="font-size: 24px; font-weight: 800; color: #10b981; margin-top: 2px;"><?php echo esc_html($total_orders); ?></div>
-        </div>
-
-        <!-- Total Revenue Box -->
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 15px; text-align: center;">
-            <span style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase;">Total Revenue</span>
-            <div style="font-size: 24px; font-weight: 900; color: #0f172a; margin-top: 2px;">$<?php echo number_format($total_revenue, 2); ?></div>
-        </div>
-
-        <!-- Gateway Breakdown Box -->
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 15px; display: flex; justify-content: space-around; align-items: center;">
-            <div style="text-align: center;">
-                <span style="font-size: 11px; font-weight: 700; color: #64748b; display: block; text-transform: uppercase;">Stripe</span>
-                <strong style="font-size: 16px; color: #2563eb;">$<?php echo number_format($stripe_revenue, 2); ?></strong>
-            </div>
-            <div style="border-right: 1px solid #cbd5e1; height: 30px;"></div>
-            <div style="text-align: center;">
-                <span style="font-size: 11px; font-weight: 700; color: #64748b; display: block; text-transform: uppercase;">PayPal</span>
-                <strong style="font-size: 16px; color: #2563eb;">$<?php echo number_format($paypal_revenue, 2); ?></strong>
-            </div>
-        </div>
-
+<div class="kvm-orders-summary">
+    <div class="kvm-stat-card">
+        <span class="kvm-stat-label">Total Orders</span>
+        <h3 class="kvm-stat-val success"><?php echo intval($total_orders); ?></h3>
+    </div>
+    <div class="kvm-stat-card">
+        <span class="kvm-stat-label">Total Revenue</span>
+        <h3 class="kvm-stat-val">$<?php echo esc_html(number_format($total_revenue, 2)); ?></h3>
+    </div>
+    <div class="kvm-stat-card">
+        <span class="kvm-stat-label">Stripe Revenue</span>
+        <h3 class="kvm-stat-val primary">$<?php echo esc_html(number_format($stripe_revenue, 2)); ?></h3>
+    </div>
+    <div class="kvm-stat-card">
+        <span class="kvm-stat-label">PayPal Revenue</span>
+        <h3 class="kvm-stat-val purple">$<?php echo esc_html(number_format($paypal_revenue, 2)); ?></h3>
     </div>
 </div>
 
-<!-- Orders List Table -->
 <div class="kvm-card-panel">
-    <h3 class="kvm-section-heading">🛒 Store Orders & Transactions</h3>
-    <p class="kvm-section-sub">Review completed customer transactions, payment gateways, slot quotas, and issued license keys.</p>
+    <div class="kvm-table-header-wrap">
+        <div>
+            <h3 class="kvm-section-heading">🛒 Store Orders &amp; Transactions</h3>
+            <p class="kvm-section-sub">Completed customer transactions, gateways, slot quotas and issued license keys.</p>
+        </div>
+        <form method="get" class="kvm-search-form">
+            <input type="hidden" name="page" value="keyvault-manager">
+            <input type="hidden" name="tab" value="orders">
+            <input type="text" name="os" value="<?php echo esc_attr($search_order); ?>" placeholder="Search order, email, name…" class="kvm-input search-input">
+            <button type="submit" class="kvm-btn compact">Search</button>
+            <a href="<?php echo esc_url(admin_url('admin.php?page=keyvault-manager&tab=orders')); ?>" class="kvm-btn compact ghost">Reset</a>
+        </form>
+    </div>
 
-    <table class="wp-list-table widefat fixed striped" style="margin-top: 15px;">
+    <div class="kvm-table-scroll">
+    <table class="kvm-table">
         <thead>
             <tr>
                 <th>Order ID</th>
@@ -72,70 +76,74 @@ foreach ($orders as $o) {
                 <th>Amount</th>
                 <th>Gateway</th>
                 <th>Date</th>
-                <th style="text-align: right;">Actions</th>
+                <th class="col-actions">Actions</th>
             </tr>
         </thead>
         <tbody>
-            <?php if (empty($orders)): ?>
-                <tr><td colspan="7" style="text-align: center; padding: 25px; color: #64748b;">No orders recorded yet.</td></tr>
-            <?php else: foreach ($orders as $order): ?>
+            <?php if (empty($orders)) : ?>
                 <tr>
+                    <td colspan="7" class="kvm-empty-cell">
+                        <div class="kvm-empty">
+                            <div class="kvm-empty-icon">🛒</div>
+                            <p>No orders recorded yet. Completed Stripe/PayPal checkouts appear here automatically.</p>
+                        </div>
+                    </td>
+                </tr>
+            <?php else : foreach ($orders as $order) : ?>
+                <tr data-kvm-order="<?php echo esc_attr(wp_json_encode(array(
+                    'order_id'       => $order->order_id,
+                    'customer_name'  => $order->customer_name,
+                    'customer_email' => $order->customer_email,
+                    'amount'         => floatval($order->amount),
+                    'gateway'        => $order->gateway,
+                    'quantity'       => intval($order->quantity),
+                    'license_mode'   => $order->license_mode,
+                    'license_keys'   => $order->license_keys,
+                ))); ?>">
                     <td><strong><?php echo esc_html($order->order_id); ?></strong></td>
                     <td><?php echo esc_html($order->customer_name); ?></td>
                     <td><?php echo esc_html($order->customer_email); ?></td>
-                    <td><strong>$<?php echo number_format(floatval($order->amount), 2); ?></strong></td>
-                    <td>
-                        <span style="background: #eff6ff; color: #2563eb; padding: 3px 10px; border-radius: 6px; font-weight: 700; font-size: 11px;">
-                            <?php echo esc_html($order->gateway); ?>
-                        </span>
-                    </td>
+                    <td><strong>$<?php echo esc_html(number_format(floatval($order->amount), 2)); ?></strong></td>
+                    <td><span class="kvm-pill lifetime"><?php echo esc_html($order->gateway); ?></span></td>
                     <td><?php echo esc_html($order->created_at); ?></td>
-                    <td style="text-align: right;">
-                        <button type="button" class="button button-small" onclick="kvmOpenOrderModal(<?php echo esc_attr(json_encode($order)); ?>)">View Details</button>
+                    <td class="col-actions">
+                        <button type="button" class="button button-small" data-kvm-order-open>View Details</button>
                     </td>
                 </tr>
             <?php endforeach; endif; ?>
         </tbody>
     </table>
-</div>
-
-<!-- Order Details Modal -->
-<div id="kvm-order-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:9999999; align-items:center; justify-content:center;">
-    <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; width:100%; max-width:600px; padding:35px; color:#0f172a; box-shadow:0 25px 50px rgba(0,0,0,0.25); position:relative;">
-        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #f1f5f9; padding-bottom:15px; margin-bottom:20px;">
-            <h3 style="margin:0; font-size:18px; font-weight:800; color:#0f172a;">Order Details: <span id="modal-order-id" style="color:#2563eb;"></span></h3>
-            <button type="button" onclick="document.getElementById('kvm-order-modal').style.display='none'" style="background:none; border:none; color:#64748b; font-size:24px; cursor:pointer; font-weight:bold;">&times;</button>
-        </div>
-        
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
-            <div><strong>Customer Name:</strong> <p id="modal-name" style="margin:4px 0 0 0; color:#475569;"></p></div>
-            <div><strong>Email Address:</strong> <p id="modal-email" style="margin:4px 0 0 0; color:#475569;"></p></div>
-            <div><strong>Total Paid:</strong> <p id="modal-amount" style="margin:4px 0 0 0; color:#10b981; font-weight:800;"></p></div>
-            <div><strong>Payment Gateway:</strong> <p id="modal-gateway" style="margin:4px 0 0 0; color:#475569;"></p></div>
-            <div><strong>Website Slots:</strong> <p id="modal-qty" style="margin:4px 0 0 0; color:#475569;"></p></div>
-            <div><strong>License Mode:</strong> <p id="modal-mode" style="margin:4px 0 0 0; color:#475569;"></p></div>
-        </div>
-
-        <div style="margin-bottom: 25px;">
-            <strong style="display:block; margin-bottom:6px; color:#0f172a;">Generated License Keys:</strong>
-            <textarea id="modal-keys" readonly class="large-text code" rows="3" style="width:100%; background:#f8fafc; font-family:monospace; padding:10px; border-radius:8px; border:1px solid #e2e8f0;"></textarea>
-        </div>
-
-        <button type="button" class="button button-primary" onclick="document.getElementById('kvm-order-modal').style.display='none'" style="width:100%;">Close Window</button>
     </div>
-</div>
 
-<script>
-function kvmOpenOrderModal(order) {
-    document.getElementById('modal-order-id').textContent = order.order_id || 'N/A';
-    document.getElementById('modal-name').textContent = order.customer_name || 'N/A';
-    document.getElementById('modal-email').textContent = order.customer_email || 'N/A';
-    document.getElementById('modal-amount').textContent = '$' + parseFloat(order.amount || 0).toFixed(2);
-    document.getElementById('modal-gateway').textContent = order.gateway || 'N/A';
-    document.getElementById('modal-qty').textContent = order.quantity || '1';
-    document.getElementById('modal-mode').textContent = order.license_mode || 'multi';
-    document.getElementById('modal-keys').value = order.license_keys || 'No keys recorded.';
-    
-    document.getElementById('kvm-order-modal').style.display = 'flex';
-}
-</script>
+    <?php if ($total_pages > 1) :
+        $base_url = admin_url('admin.php?page=keyvault-manager&tab=orders');
+        if (!empty($search_order)) {
+            $base_url = add_query_arg('os', urlencode($search_order), $base_url);
+        }
+        ?>
+        <div class="kvm-pagination-wrap">
+            <div class="kvm-pagination-info">
+                Showing <?php echo intval($offset + 1); ?> &ndash; <?php echo intval(min($offset + $per_page, $total_orders)); ?> of <?php echo intval($total_orders); ?> orders
+            </div>
+            <div class="kvm-pagination-links">
+                <?php
+                if ($current_page > 1) {
+                    echo '<a href="' . esc_url(add_query_arg('paged', $current_page - 1, $base_url)) . '" class="button prev">&laquo; Previous</a>';
+                }
+                for ($p = 1; $p <= $total_pages; $p++) {
+                    if ($p === $current_page) {
+                        echo '<span class="button disabled active">' . intval($p) . '</span>';
+                    } elseif ($p <= 3 || $p >= $total_pages - 2 || abs($p - $current_page) <= 1) {
+                        echo '<a href="' . esc_url(add_query_arg('paged', $p, $base_url)) . '" class="button">' . intval($p) . '</a>';
+                    } elseif ($p === 4 || $p === $total_pages - 3) {
+                        echo '<span class="dots">…</span>';
+                    }
+                }
+                if ($current_page < $total_pages) {
+                    echo '<a href="' . esc_url(add_query_arg('paged', $current_page + 1, $base_url)) . '" class="button next">Next &raquo;</a>';
+                }
+                ?>
+            </div>
+        </div>
+    <?php endif; ?>
+</div>
