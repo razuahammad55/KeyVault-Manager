@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       KeyVault Manager
  * Description:       Premium self-hosted SaaS licensing hub with expiration grace-period engine, customer portal, payment gateways and enterprise security.
- * Version:           6.0.0
+ * Version:           6.1.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Razu Ahammad
@@ -36,7 +36,7 @@ if (!defined('KVM_ACCESS_HASH')) {
 
 define('KVM_PATH', plugin_dir_path(__FILE__));
 define('KVM_URL', plugin_dir_url(__FILE__));
-define('KVM_VERSION', '6.0.0');
+define('KVM_VERSION', '6.1.0');
 define('KVM_DB_VERSION', '6.0.0');
 define('KVM_PLUGIN_BASENAME', plugin_basename(__FILE__));
 define('KVM_REST_NAMESPACE', KVM_SLUG . '/v1');

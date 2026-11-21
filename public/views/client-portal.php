@@ -130,18 +130,12 @@ $logout_url = wp_nonce_url($public->get_url(array('action' => 'logout')), $slug 
                         <p>No licenses are attached to your account yet — downloads unlock with your first license key.</p>
                     </div>
                 <?php else :
-                    $first_key = '';
-                    foreach ($licenses as $lic) {
-                        if ($lic->status === 'active') { $first_key = $lic->license_key; break; }
-                    }
-                    if ($first_key === '') { $first_key = $licenses[0]->license_key; }
-                    $namespace = defined('KVM_REST_NAMESPACE') ? KVM_REST_NAMESPACE : $slug . '/v1';
-                    $dl_link = site_url('/wp-json/' . $namespace . '/download-update?key=' . urlencode($first_key));
+                    $dl_link = wp_nonce_url($public->get_url(array('action' => 'download_start')), 'kvm_dl_start');
                     ?>
                     <div class="kvm-panel kvm-panel--soft kvm-download-row">
                         <div>
                             <strong class="kvm-download-title"><?php echo esc_html(ucwords($slug)); ?> Optimization Engine</strong>
-                            <span class="kvm-muted">Official client plugin package — latest licensed build.</span>
+                            <span class="kvm-muted">Official client plugin package — every click generates a fresh, single-use secure download link.</span>
                         </div>
                         <a href="<?php echo esc_url($dl_link); ?>" class="kvm-btn kvm-btn--success">Download ZIP &darr;</a>
                     </div>

@@ -4,7 +4,7 @@ Premium self-hosted SaaS licensing hub for WordPress: sell and manage license ke
 products, run a customer portal, accept Stripe/PayPal payments, and distribute plugin updates
 from your own hub — all under your own brand (white-label ready).
 
-**Version:** 6.0.0 · **Requires:** WordPress 5.8+, PHP 7.4+ · **License:** GPL-2.0-or-later
+**Version:** 6.1.0 · **Requires:** WordPress 5.8+, PHP 7.4+ · **License:** GPL-2.0-or-later
 
 ## What it does
 

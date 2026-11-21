@@ -33,7 +33,13 @@ class KeyVault_Manager_Public {
         add_action('wp_loaded', array($this, 'handle_form_submissions'), 10);
         add_action('wp_loaded', array($this, 'handle_unlink_action'), 10);
         add_action('wp_loaded', array($this, 'handle_logout'), 10);
+        add_action('wp_loaded', array($this, 'handle_download_request'), 10);
         add_action('wp', array($this, 'maybe_send_nocache_headers'));
+        add_action('wp', array($this, 'maybe_enqueue_shortcode_assets'));
+
+        // Safety net: print any style enqueued too late for wp_head (page
+        // builders that inject shortcodes outside post_content).
+        add_action('wp_footer', array($this, 'print_pending_styles'), 99);
     }
 
     /**
@@ -96,6 +102,53 @@ class KeyVault_Manager_Public {
         $slug = KVM_SLUG;
         wp_enqueue_style($slug . '-frontend-style');
         wp_enqueue_script($slug . '-frontend-script');
+    }
+
+    /**
+     * Enqueue portal/order assets before wp_head() renders when the current
+     * post content contains one of the plugin shortcodes. Enqueuing at this
+     * stage guarantees the stylesheet is printed inside <head>; shortcodes
+     * render during the_content, which is too late for styles (scripts are
+     * footer-printed and unaffected).
+     */
+    public function maybe_enqueue_shortcode_assets() {
+        if (!is_singular()) {
+            return;
+        }
+        $post = get_post();
+        if (!$post || empty($post->post_content)) {
+            return;
+        }
+        $slug = KVM_SLUG;
+        $shortcodes = array(
+            $slug . '_order_form',
+            $slug . '_login_form',
+            $slug . '_client_dashboard',
+            $slug . '_customer_portal',
+        );
+        foreach ($shortcodes as $tag) {
+            if (has_shortcode($post->post_content, $tag)) {
+                $this->enqueue_public_assets();
+                return;
+            }
+        }
+    }
+
+    /**
+     * Fallback for environments where the shortcode is injected without being
+     * part of post_content (page builders, widgets): print the stylesheet in
+     * the footer if wp_head already finished. Runs only when the handle was
+     * actually enqueued by a shortcode render (never site-wide), and
+     * wp_print_styles() skips handles that were already printed.
+     */
+    public function print_pending_styles() {
+        $handle = KVM_SLUG . '-frontend-style';
+        if (!wp_style_is($handle, 'enqueued')) {
+            return; // No shortcode rendered on this page.
+        }
+        if (!wp_style_is($handle, 'done')) {
+            wp_print_styles($handle);
+        }
     }
 
     /**
@@ -836,5 +889,121 @@ class KeyVault_Manager_Public {
         KeyVault_Manager_User_Auth::get_instance()->logout();
         wp_safe_redirect($this->get_url(array('auth' => 'login', 'msg' => 'logged_out')));
         exit;
+    }
+
+    /* ------------------------------------------------------------------
+     * Hidden-path downloads.
+     *
+     * Step 1 — "download_start" (portal user, nonce-checked): issues a
+     *          one-time 64-hex token bound to the customer's license and
+     *          redirects to site_url/?kvm_dl=<token>. The real ZIP path is
+     *          never exposed; every click generates a fresh token.
+     * Step 2 — "?kvm_dl=<token>": validates, consumes (single use) and
+     *          streams the configured package. No login required — the
+     *          random token *is* the credential, and it expires in 10 min.
+     * ---------------------------------------------------------------- */
+
+    public function handle_download_request() {
+        $slug = KVM_SLUG;
+
+        /* Step 1: portal user requests a fresh download link. */
+        if (!empty($_GET[$slug . '_action']) && $_GET[$slug . '_action'] === 'download_start') {
+            $nonce = isset($_GET['_wpnonce']) ? sanitize_text_field(wp_unslash($_GET['_wpnonce'])) : '';
+            if (!wp_verify_nonce($nonce, 'kvm_dl_start')) {
+                wp_die(esc_html__('Security check failed.', 'cdf'), 403);
+            }
+
+            $user = KeyVault_Manager_User_Auth::get_instance()->get_current_user();
+            if (!$user) {
+                wp_safe_redirect($this->get_url(array('auth' => 'login')));
+                exit;
+            }
+
+            // Throttle token minting (prevents link-farming abuse).
+            if (!KeyVault_Manager_User_Auth::throttle('dl_start_' . intval($user->id), 20, HOUR_IN_SECONDS)) {
+                wp_die(esc_html__('Too many download requests. Please try again in a little while.', 'cdf'), 429);
+            }
+
+            global $wpdb;
+            $licenses = $wpdb->get_results($wpdb->prepare(
+                "SELECT id FROM " . KeyVault_Manager_DB::table('licenses') . "
+                 WHERE (user_id = %d OR customer_email = %s) AND status = 'active'
+                 ORDER BY id ASC LIMIT 1",
+                intval($user->id),
+                sanitize_email($user->email)
+            ));
+            if (empty($licenses)) {
+                wp_die(esc_html__('No active license found on your account. Downloads require an active license.', 'cdf'), 403);
+            }
+
+            $license_id = intval($licenses[0]->id);
+            $token      = bin2hex(random_bytes(32)); // 256-bit, unique per click.
+
+            add_option(
+                '_kvm_dl_' . $token,
+                wp_json_encode(array('lic' => $license_id, 'exp' => time() + 10 * MINUTE_IN_SECONDS)),
+                '',
+                'no'
+            );
+
+            wp_safe_redirect(site_url('/?kvm_dl=' . rawurlencode($token)));
+            exit;
+        }
+
+        /* Step 2: consume the one-time token and stream the package. */
+        if (empty($_GET['kvm_dl'])) {
+            return;
+        }
+
+        $token = isset($_GET['kvm_dl']) ? sanitize_text_field(wp_unslash($_GET['kvm_dl'])) : '';
+        if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
+            $this->download_error();
+        }
+
+        $option_name = '_kvm_dl_' . $token;
+        $stored      = get_option($option_name);
+        if (!$stored) {
+            $this->download_error(); // Already used, expired, or unknown.
+        }
+
+        $data = json_decode($stored, true);
+        if (!is_array($data) || empty($data['lic']) || empty($data['exp']) || intval($data['exp']) < time()) {
+            delete_option($option_name);
+            $this->download_error();
+        }
+
+        // Single use: whoever deletes the row first gets the download.
+        if (!delete_option($option_name)) {
+            $this->download_error();
+        }
+
+        global $wpdb;
+        $license = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM " . KeyVault_Manager_DB::table('licenses') . " WHERE id = %d",
+            intval($data['lic'])
+        ));
+        if (!$license || $license->status !== 'active') {
+            $this->download_error('Your license is no longer active. Please contact support.');
+        }
+        if (!empty($license->expires_at)) {
+            $grace_days = intval(get_option('kvm_grace_period_days', '7'));
+            if (strtotime(current_time('mysql')) > strtotime($license->expires_at) + $grace_days * DAY_IN_SECONDS) {
+                $this->download_error('Your license has expired. Please renew to keep downloading.');
+            }
+        }
+
+        KeyVault_Manager_Logger::log('download', $license->license_key, '', 200, 'One-time token download served.');
+        KeyVault_Manager_Updater_Server::stream_package();
+    }
+
+    private function download_error($message = '') {
+        if ($message === '') {
+            $message = 'This download link is invalid, expired, or was already used. Please request a fresh link from your portal.';
+        }
+        wp_die(
+            '<h1>' . esc_html(kvm_brand_name()) . '</h1><p>' . esc_html($message) . '</p><p><a href="' . esc_url(self::portal_url()) . '">' . esc_html__('Return to the customer portal', 'cdf') . '</a></p>',
+            esc_html__('Download unavailable', 'cdf'),
+            array('response' => 403)
+        );
     }
 }
