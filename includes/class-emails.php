@@ -11,25 +11,35 @@ class KeyVault_Manager_Emails {
         return self::$instance;
     }
 
-    private function __construct() {}
+    private function __construct() {
+        add_action('kvm_daily_maintenance', array($this, 'run_maintenance'));
+    }
 
     /**
      * Backwards-compatible order email dispatcher.
+     *
+     * @param string $name
+     * @param string $email
+     * @param array|string $keys  All generated license keys (not just the first).
+     * @param int    $quantity
+     * @param string $temp_pass   One-time portal password (shown in email only).
+     * @param bool   $is_lifetime
+     * @param array  $order_ctx   array(order_id, amount, gateway)
      */
-    public function send_order_emails($name, $email, $primary_key, $quantity, $temp_pass = '', $is_lifetime = false, $order_id = '', $amount = '', $gateway = '') {
+    public function send_order_emails($name, $email, $keys, $quantity, $temp_pass = '', $is_lifetime = false, $order_ctx = array()) {
         $billing_type = $is_lifetime ? 'Lifetime' : '1 Year (Annual)';
-        $login_url    = get_option('kvm_custom_login_url', site_url('/keyvault-login'));
+        $login_url    = KeyVault_Manager_Public::portal_url();
 
         $data = array(
             'customer_name'  => $name,
             'customer_email' => $email,
-            'order_id'       => $order_id,
-            'license_keys'   => $primary_key,
+            'order_id'       => isset($order_ctx['order_id']) ? $order_ctx['order_id'] : '',
+            'license_keys'   => implode("\n", (array) $keys),
             'quantity'       => intval($quantity),
             'billing_type'   => $billing_type,
             'temp_pass'      => $temp_pass,
-            'amount'         => $amount,
-            'gateway'        => $gateway,
+            'amount'         => isset($order_ctx['amount']) ? (string) $order_ctx['amount'] : '',
+            'gateway'        => isset($order_ctx['gateway']) ? (string) $order_ctx['gateway'] : '',
             'portal_url'     => $login_url,
         );
 
@@ -44,7 +54,7 @@ class KeyVault_Manager_Emails {
     /**
      * Dispatch a specific notification event configured in the Email tab.
      *
-     * @param string $event_key Event key (e.g., admin_new_order, user_order_delivery).
+     * @param string $event_key Event key (e.g. admin_new_order, user_order_delivery).
      * @param string $to_email  Target email for user notifications (ignored for admin_* events).
      * @param array  $data      Associative array of merge tag values.
      * @return bool
@@ -96,8 +106,11 @@ class KeyVault_Manager_Emails {
         $subject = strtr($raw_subject, $replacements);
         $body    = nl2br(esc_html(strtr($raw_body, $replacements)));
 
-        $primary_color = sanitize_hex_color(get_option('kvm_primary_color', '#2563eb')) ?: '#2563eb';
-        $html_body     = $this->wrap_email_html($subject, $body, $primary_color, $data);
+        $primary_color = sanitize_hex_color(get_option('kvm_primary_color', '#2563eb'));
+        if (!$primary_color) {
+            $primary_color = '#2563eb';
+        }
+        $html_body = $this->wrap_email_html($subject, $body, $primary_color, $data);
 
         $headers = $this->build_headers();
 
@@ -126,7 +139,7 @@ class KeyVault_Manager_Emails {
     private function build_replacements($data, $fallback_email = '') {
         $customer_email = !empty($data['customer_email']) ? sanitize_email($data['customer_email']) : sanitize_email($fallback_email);
         $customer_name  = !empty($data['customer_name']) ? sanitize_text_field($data['customer_name']) : 'Customer';
-        $portal_url     = !empty($data['portal_url']) ? esc_url_raw($data['portal_url']) : esc_url_raw(get_option('kvm_custom_login_url', site_url('/keyvault-login')));
+        $portal_url     = !empty($data['portal_url']) ? esc_url_raw($data['portal_url']) : esc_url_raw(KeyVault_Manager_Public::portal_url());
 
         $ip_address = '';
         if (!empty($_SERVER['REMOTE_ADDR'])) {
@@ -137,10 +150,10 @@ class KeyVault_Manager_Emails {
             '{customer_name}'  => $customer_name,
             '{customer_email}' => $customer_email,
             '{order_id}'       => isset($data['order_id']) ? sanitize_text_field($data['order_id']) : '',
-            '{license_keys}'   => isset($data['license_keys']) ? sanitize_text_field($data['license_keys']) : '',
+            '{license_keys}'   => isset($data['license_keys']) ? sanitize_textarea_field($data['license_keys']) : '',
             '{quantity}'       => isset($data['quantity']) ? sanitize_text_field((string) $data['quantity']) : '',
             '{amount}'         => isset($data['amount']) ? sanitize_text_field((string) $data['amount']) : '',
-            '{gateway}'        => isset($data['gateway']) ? sanitize_text_field($data['gateway']) : '',
+            '{gateway}'        => isset($data['gateway']) ? sanitize_text_field((string) $data['gateway']) : '',
             '{domain}'         => isset($data['domain']) ? sanitize_text_field($data['domain']) : '',
             '{expiry_date}'    => isset($data['expiry_date']) ? sanitize_text_field($data['expiry_date']) : '',
             '{portal_url}'     => $portal_url,
@@ -232,6 +245,58 @@ class KeyVault_Manager_Emails {
             ),
         );
 
-        return $all[$event_key] ?? array();
+        return isset($all[$event_key]) ? $all[$event_key] : array();
+    }
+
+    /**
+     * Daily maintenance (kvm_daily_maintenance cron):
+     * - logs are purged by the Logger;
+     * - renewal reminders are dispatched once per license, 14 days before expiry.
+     */
+    public function run_maintenance() {
+        global $wpdb;
+
+        $table  = KeyVault_Manager_DB::table('licenses');
+        $users  = KeyVault_Manager_DB::table('users');
+        $cutoff = date('Y-m-d H:i:s', strtotime(current_time('mysql')) + 14 * DAY_IN_SECONDS);
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT l.*, u.email AS portal_email, u.name AS portal_name
+             FROM $table l
+             LEFT JOIN $users u ON u.id = l.user_id
+             WHERE l.status = 'active'
+               AND l.expires_at IS NOT NULL AND l.expires_at <> ''
+               AND l.expires_at <= %s",
+            $cutoff
+        ));
+
+        if (empty($rows)) {
+            return;
+        }
+
+        foreach ($rows as $lic) {
+            $email = !empty($lic->portal_email) ? $lic->portal_email : $lic->customer_email;
+            $name  = !empty($lic->portal_name) ? $lic->portal_name : $lic->customer_name;
+            if (empty($email)) {
+                continue;
+            }
+
+            // One reminder per (license, expiry) pair — transient lives 30 days.
+            $flag_key = 'kvm_reminded_' . intval($lic->id);
+            $already  = get_transient($flag_key);
+            if ($already && $already === (string) $lic->expires_at) {
+                continue;
+            }
+
+            $this->send_event_email('user_renewal_reminder', $email, array(
+                'customer_name' => $name,
+                'customer_email' => $email,
+                'license_keys'  => $lic->license_key,
+                'expiry_date'   => date('M d, Y', strtotime($lic->expires_at)),
+                'portal_url'    => KeyVault_Manager_Public::portal_url(),
+            ));
+
+            set_transient($flag_key, (string) $lic->expires_at, 30 * DAY_IN_SECONDS);
+        }
     }
 }

@@ -2,59 +2,111 @@
 if (!defined('ABSPATH')) { exit; }
 global $wpdb;
 
-$search = isset($_GET['s']) ? sanitize_text_field($_GET['s']) : '';
+$search       = isset($_GET['s']) ? sanitize_text_field(wp_unslash($_GET['s'])) : '';
 $current_page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
-$per_page = 100;
-$offset = ($current_page - 1) * $per_page;
+$per_page     = 25;
+$offset       = ($current_page - 1) * $per_page;
 
-$slug = get_option('kvm_plugin_slug', KVM_SLUG);
-$table_licenses = $wpdb->prefix . $slug . '_licenses';
-$table_users = $wpdb->prefix . $slug . '_users';
-$table_activations = $wpdb->prefix . $slug . '_activations';
+$table_licenses    = KeyVault_Manager_DB::table('licenses');
+$table_users       = KeyVault_Manager_DB::table('users');
+$table_activations = KeyVault_Manager_DB::table('activations');
 
-// Load configured slot range boundaries so license rows match order form plan tiers
-$starter_max = intval(get_option($slug . '_starter_max', '9'));
-$pro_max     = intval(get_option($slug . '_pro_max', '99'));
+$starter_max = intval(get_option('kvm_starter_max', 9));
+$pro_max     = intval(get_option('kvm_pro_max', 99));
+$grace_days  = intval(get_option('kvm_grace_period_days', 7));
+$now         = strtotime(current_time('mysql'));
 
+// One grouped query for activation counts (no per-row lookups).
+$join_acts = "LEFT JOIN $table_activations a ON a.license_id = l.id";
+$search_clause = '';
+$search_args = array();
 if (!empty($search)) {
-    $total_items = intval($wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $table_licenses WHERE license_key LIKE %s OR customer_email LIKE %s OR customer_name LIKE %s", '%' . $wpdb->esc_like($search) . '%', '%' . $wpdb->esc_like($search) . '%', '%' . $wpdb->esc_like($search) . '%')));
-    $licenses = $wpdb->get_results($wpdb->prepare("SELECT * FROM $table_licenses WHERE license_key LIKE %s OR customer_email LIKE %s OR customer_name LIKE %s ORDER BY id DESC LIMIT %d OFFSET %d", '%' . $wpdb->esc_like($search) . '%', '%' . $wpdb->esc_like($search) . '%', '%' . $wpdb->esc_like($search) . '%', $per_page, $offset));
-} else {
-    $total_items = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses"));
-    $licenses = $wpdb->get_results($wpdb->prepare("SELECT * FROM $table_licenses ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset));
+    $like = '%' . $wpdb->esc_like($search) . '%';
+    $search_clause = 'AND (l.license_key LIKE %s OR l.customer_email LIKE %s OR l.customer_name LIKE %s)';
+    $search_args = array($like, $like, $like);
 }
 
-$total_pages = ceil($total_items / $per_page);
+$count_args = $search_args;
+$total_items = intval($wpdb->get_var($wpdb->prepare(
+    "SELECT COUNT(DISTINCT l.id) FROM $table_licenses l WHERE l.status != 'parent_holder' $search_clause",
+    $count_args
+)));
 
-$users = $wpdb->get_results("SELECT * FROM $table_users ORDER BY name ASC");
+$query_args = array_merge($search_args, array($per_page, $offset));
+$licenses = $wpdb->get_results($wpdb->prepare(
+    "SELECT l.*, COUNT(a.id) AS activation_count
+     FROM $table_licenses l
+     $join_acts
+     WHERE l.status != 'parent_holder' $search_clause
+     GROUP BY l.id
+     ORDER BY l.id DESC
+     LIMIT %d OFFSET %d",
+    $query_args
+));
+$total_pages = max(1, (int) ceil($total_items / $per_page));
 
-$total_users_count = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_users"));
-$total_keys_count = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status != 'parent_holder'"));
-$active_keys_count = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status = 'active'"));
-$revoked_keys_count = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status = 'revoked'"));
-$total_linked_sites = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activations"));
+// Batch-fetch all activations for this page's licenses (single query).
+$page_domains = array();
+if (!empty($licenses)) {
+    $page_ids = array();
+    foreach ($licenses as $lic_row) {
+        $page_ids[] = intval($lic_row->id);
+    }
+    $ids_in = implode(',', $page_ids);
+    $all_acts = $wpdb->get_results("SELECT id, license_id, domain FROM $table_activations WHERE license_id IN ($ids_in) ORDER BY id ASC");
+    foreach ($all_acts as $act_row) {
+        $page_domains[intval($act_row->license_id)][] = $act_row;
+    }
+}
+
+$users = $wpdb->get_results("SELECT id, name, email FROM $table_users ORDER BY name ASC LIMIT 500");
+
+$total_users_count   = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_users"));
+$total_keys_count    = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status != 'parent_holder'"));
+$active_keys_count   = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status = 'active'"));
+$revoked_keys_count  = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_licenses WHERE status = 'revoked'"));
+$total_linked_sites  = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activations"));
+
+if (isset($_GET['issue_error'])) {
+    echo '<div class="kvm-notice danger">❌ Select a user account before issuing keys.</div>';
+}
+if (isset($_GET['expiry_error'])) {
+    echo '<div class="kvm-notice danger">❌ A specific date is required when choosing a custom expiration.</div>';
+}
+if (isset($_GET['expiry_updated'])) {
+    echo '<div class="kvm-notice success">✅ Expiration updated.</div>';
+}
+if (isset($_GET['row_updated'])) {
+    echo '<div class="kvm-notice success">✅ License updated.</div>';
+}
+if (isset($_GET['deleted'])) {
+    echo '<div class="kvm-notice success">🗑️ License deleted.</div>';
+}
+if (isset($_GET['bulk_processed'])) {
+    echo '<div class="kvm-notice success">✅ Bulk action completed.</div>';
+}
 ?>
 
 <div class="kvm-stats-grid">
     <div class="kvm-stat-card">
         <span class="kvm-stat-label">Registered Users</span>
-        <h3 class="kvm-stat-val"><?php echo $total_users_count; ?></h3>
+        <h3 class="kvm-stat-val"><?php echo intval($total_users_count); ?></h3>
     </div>
     <div class="kvm-stat-card">
         <span class="kvm-stat-label">Total License Keys</span>
-        <h3 class="kvm-stat-val primary"><?php echo $total_keys_count; ?></h3>
+        <h3 class="kvm-stat-val primary"><?php echo intval($total_keys_count); ?></h3>
     </div>
     <div class="kvm-stat-card">
         <span class="kvm-stat-label">Active Keys</span>
-        <h3 class="kvm-stat-val success"><?php echo $active_keys_count; ?></h3>
+        <h3 class="kvm-stat-val success"><?php echo intval($active_keys_count); ?></h3>
     </div>
     <div class="kvm-stat-card">
         <span class="kvm-stat-label">Revoked Keys</span>
-        <h3 class="kvm-stat-val danger"><?php echo $revoked_keys_count; ?></h3>
+        <h3 class="kvm-stat-val danger"><?php echo intval($revoked_keys_count); ?></h3>
     </div>
     <div class="kvm-stat-card">
         <span class="kvm-stat-label">Linked Websites</span>
-        <h3 class="kvm-stat-val purple"><?php echo $total_linked_sites; ?></h3>
+        <h3 class="kvm-stat-val purple"><?php echo intval($total_linked_sites); ?></h3>
     </div>
 </div>
 
@@ -65,13 +117,15 @@ $total_linked_sites = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activat
         <div>
             <label class="kvm-form-label">Select User Account:</label>
             <select name="user_id" class="kvm-select" required>
-                <option value="">-- Select Existing User --</option>
-                <?php foreach($users as $u) echo '<option value="' . $u->id . '">' . esc_html($u->name) . ' (' . esc_html($u->email) . ')</option>'; ?>
+                <option value="">— Select Existing User —</option>
+                <?php foreach ($users as $u) : ?>
+                    <option value="<?php echo intval($u->id); ?>"><?php echo esc_html($u->name . ' (' . $u->email . ')'); ?></option>
+                <?php endforeach; ?>
             </select>
         </div>
         <div>
-            <label class="kvm-form-label">Websites / Quota:</label>
-            <input type="number" name="custom_sites" value="10" min="1" class="kvm-input">
+            <label class="kvm-form-label">Website Slots / Keys:</label>
+            <input type="number" name="custom_sites" value="10" min="1" max="10000" class="kvm-input">
         </div>
         <div>
             <label class="kvm-form-label">Key Architecture:</label>
@@ -84,40 +138,50 @@ $total_linked_sites = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activat
             <label class="kvm-form-label">Expiry Duration:</label>
             <select name="expiry_choice" class="kvm-select">
                 <option value="standard">1 Year (Annual)</option>
+                <option value="6_months">6 Months</option>
+                <option value="3_years">3 Years</option>
                 <option value="lifetime">Lifetime</option>
             </select>
         </div>
+        <div class="kvm-issue-form-notes">
+            <label class="kvm-form-label">Internal Notes (optional):</label>
+            <input type="text" name="kvm_notes" class="kvm-input" placeholder="e.g. Agency bundle for ACME">
+        </div>
         <div>
-            <button type="submit" name="kvm_generate_key" class="kvm-btn-submit full-width">Issue License Key</button>
+            <button type="submit" name="kvm_generate_key" class="kvm-btn kvm-btn--primary kvm-btn--block">Issue License Key</button>
         </div>
     </form>
 </div>
 
 <div class="kvm-card-panel">
+    <div class="kvm-table-header-wrap">
+        <h3 class="kvm-inline-title">Active License Database</h3>
+        <form method="get" class="kvm-search-form">
+            <input type="hidden" name="page" value="keyvault-manager">
+            <input type="hidden" name="tab" value="licenses">
+            <input type="text" name="s" value="<?php echo esc_attr($search); ?>" placeholder="Search key, email, name…" class="kvm-input search-input">
+            <button type="submit" class="kvm-btn compact">Search</button>
+            <a href="<?php echo esc_url(admin_url('admin.php?page=keyvault-manager&tab=licenses')); ?>" class="kvm-btn compact ghost">Reset</a>
+        </form>
+    </div>
+
     <form method="post" id="kvm-bulk-licenses-form">
         <?php wp_nonce_field('kvm_bulk_license_action', 'kvm_bulk_license_nonce'); ?>
-        <div class="kvm-table-header-wrap">
-            <div class="kvm-bulk-actions-wrap">
-                <h3 class="kvm-inline-title">Active License Database</h3>
-                <select name="bulk_action" class="kvm-select bulk-select">
-                    <option value="">Bulk Actions</option>
-                    <option value="activate">Set Active</option>
-                    <option value="revoke">Revoke Selected</option>
-                    <option value="delete">Delete Selected</option>
-                </select>
-                <button type="submit" name="kvm_bulk_license_action" class="kvm-btn-submit compact">Apply</button>
-            </div>
-            
-            <div class="kvm-search-wrap">
-                <input type="text" name="s" value="<?php echo esc_attr($search); ?>" placeholder="Search key, email, name..." class="kvm-input search-input">
-                <a href="<?php echo admin_url('admin.php?page=keyvault-manager'); ?>" class="button kvm-reset-btn">Reset</a>
-            </div>
+        <div class="kvm-bulk-bar">
+            <select name="bulk_action" class="kvm-select bulk-select">
+                <option value="">Bulk Actions</option>
+                <option value="activate">Set Active</option>
+                <option value="revoke">Revoke Selected</option>
+                <option value="delete">Delete Selected</option>
+            </select>
+            <button type="submit" name="kvm_bulk_license_action" class="kvm-btn compact" data-kvm-confirm="Apply the selected bulk action to all checked licenses?">Apply</button>
         </div>
 
+<div class="kvm-table-scroll">
         <table class="kvm-table">
             <thead>
                 <tr>
-                    <th class="col-checkbox"><input type="checkbox" id="kvm-select-all-keys"></th>
+                    <th class="col-checkbox"><input type="checkbox" id="kvm-select-all-keys" aria-label="Select all licenses"></th>
                     <th class="col-key">License Key</th>
                     <th>Plan &amp; Mode</th>
                     <th>Customer</th>
@@ -129,13 +193,18 @@ $total_linked_sites = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activat
             </thead>
             <tbody>
                 <?php if (empty($licenses)) : ?>
-                    <tr><td colspan="8" class="kvm-empty-row">No licenses found.</td></tr>
+                    <tr>
+                        <td colspan="8" class="kvm-empty-cell">
+                            <div class="kvm-empty">
+                                <div class="kvm-empty-icon">🔑</div>
+                                <p><?php echo !empty($search) ? 'No licenses match your search.' : 'No licenses issued yet. Create a user, then issue the first key above.'; ?></p>
+                            </div>
+                        </td>
+                    </tr>
                 <?php else : ?>
                     <?php foreach ($licenses as $l) :
-                        if ($l->status === 'parent_holder') continue;
-                        $acts = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table_activations} WHERE license_id = %d", $l->id));
-
-                        $quota_val = intval($l->max_activations);
+                        $quota_val   = intval($l->max_activations);
+                        $act_count   = intval($l->activation_count);
                         if (!empty($l->plan_tier)) {
                             $plan_tier = sanitize_text_field($l->plan_tier);
                         } elseif ($quota_val > $pro_max) {
@@ -145,179 +214,112 @@ $total_linked_sites = intval($wpdb->get_var("SELECT COUNT(*) FROM $table_activat
                         } else {
                             $plan_tier = 'Starter';
                         }
+                        $license_mode = isset($l->license_mode) ? sanitize_text_field($l->license_mode) : 'multi';
 
-                        $license_mode = isset($l->license_mode) ? $l->license_mode : 'multi';
-                        $badge_class = sanitize_html_class(strtolower($plan_tier));
-                        
-                        $now = current_time('timestamp');
-                        $grace_days = intval(get_option('kvm_grace_period_days', '7'));
                         $is_expired = (!empty($l->expires_at) && strtotime($l->expires_at) < $now);
-                        $is_grace = false;
+                        $is_grace   = false;
                         if ($is_expired) {
-                            $grace_cutoff = strtotime($l->expires_at) + ($grace_days * 86400);
-                            if ($now <= $grace_cutoff) {
-                                $is_grace = true;
+                            $grace_cutoff = strtotime($l->expires_at) + ($grace_days * DAY_IN_SECONDS);
+                            $is_grace = ($now <= $grace_cutoff);
+                        }
+
+                        $exp_display = empty($l->expires_at) ? 'Lifetime' : date('M d, Y', strtotime($l->expires_at));
+                        $status_label = $is_grace ? 'GRACE PERIOD' : strtoupper(sanitize_text_field($l->status));
+
+                        // Domain rows for the shared details modal (JS-populated, batch-fetched below).
+                        $domains_payload = array();
+                        if (isset($page_domains[intval($l->id)])) {
+                            foreach ($page_domains[intval($l->id)] as $a) {
+                                $domains_payload[] = array(
+                                    'domain' => $a->domain,
+                                    'unlink' => wp_nonce_url(admin_url('admin.php?page=keyvault-manager&action=admin_unlink_instant&act_id=' . $a->id), 'admin_unlink_' . $a->id),
+                                );
                             }
                         }
-                        
-                        $exp_display = empty($l->expires_at) ? 'Lifetime' : esc_html(date('M d, Y', strtotime($l->expires_at)));
+
+                        $revoke_url   = wp_nonce_url(admin_url('admin.php?page=keyvault-manager&tab=licenses&action=revoke&id=' . $l->id), 'revoke_key_' . $l->id);
+                        $activate_url = wp_nonce_url(admin_url('admin.php?page=keyvault-manager&tab=licenses&action=activate&id=' . $l->id), 'activate_key_' . $l->id);
+                        $delete_url   = wp_nonce_url(admin_url('admin.php?page=keyvault-manager&tab=licenses&action=delete_key&id=' . $l->id), 'delete_key_' . $l->id);
                         ?>
-                        <tr>
-                            <td><input type="checkbox" name="license_ids[]" value="<?php echo $l->id; ?>" class="kvm-key-cb"></td>
+                        <tr data-kvm-id="<?php echo intval($l->id); ?>"
+                            data-kvm-key="<?php echo esc_attr($l->license_key); ?>"
+                            data-kvm-customer="<?php echo esc_attr(trim($l->customer_name . ' — ' . $l->customer_email, ' —')); ?>"
+                            data-kvm-plan="<?php echo esc_attr($plan_tier . ' · ' . strtoupper($license_mode)); ?>"
+                            data-kvm-quota="<?php echo esc_attr($act_count . ' used / ' . $quota_val . ' max'); ?>"
+                            data-kvm-expiry="<?php echo esc_attr($exp_display); ?>"
+                            data-kvm-status="<?php echo esc_attr($status_label); ?>"
+                            data-kvm-domains="<?php echo esc_attr(wp_json_encode($domains_payload)); ?>"
+                            data-kvm-revoke-url="<?php echo esc_url($revoke_url); ?>"
+                            data-kvm-activate-url="<?php echo esc_url($activate_url); ?>"
+                            data-kvm-delete-url="<?php echo esc_url($delete_url); ?>"
+                            data-kvm-expiry-current="<?php echo esc_attr($l->expires_at ? date('Y-m-d', strtotime($l->expires_at)) : ''); ?>">
+                            <td class="col-checkbox"><input type="checkbox" name="license_ids[]" value="<?php echo intval($l->id); ?>" class="kvm-key-cb"></td>
                             <td><code class="kvm-code"><?php echo esc_html($l->license_key); ?></code></td>
                             <td>
-                                <strong class="kvm-plan-badge <?php echo $badge_class; ?>"><?php echo strtoupper(esc_html($plan_tier)); ?></strong>
-                                <span class="kvm-mode-sub">(<?php echo strtoupper(esc_html($license_mode)); ?>)</span>
+                                <strong class="kvm-plan-badge <?php echo esc_attr(strtolower($plan_tier)); ?>"><?php echo esc_html(strtoupper($plan_tier)); ?></strong>
+                                <span class="kvm-mode-sub">(<?php echo esc_html(strtoupper($license_mode)); ?>)</span>
                             </td>
-                            <td><strong><?php echo esc_html($l->customer_name); ?></strong><br><small class="kvm-sub-text"><?php echo esc_html($l->customer_email); ?></small></td>
                             <td>
-                                <strong class="kvm-quota-text"><?php echo count($acts); ?> / <?php echo esc_html($l->max_activations); ?></strong>
+                                <strong><?php echo esc_html($l->customer_name); ?></strong><br>
+                                <small class="kvm-sub-text"><?php echo esc_html($l->customer_email); ?></small>
                             </td>
+                            <td><strong class="kvm-quota-text"><?php echo intval($act_count); ?> / <?php echo intval($quota_val); ?></strong></td>
                             <td>
                                 <?php if (empty($l->expires_at)) : ?>
                                     <span class="kvm-pill lifetime">Lifetime</span>
                                 <?php elseif ($is_grace) : ?>
-                                    <span class="kvm-pill grace">Grace Period (<?php echo $exp_display; ?>)</span>
+                                    <span class="kvm-pill grace">Grace (<?php echo esc_html($exp_display); ?>)</span>
                                 <?php elseif ($is_expired) : ?>
-                                    <span class="kvm-pill expired">Expired (<?php echo $exp_display; ?>)</span>
+                                    <span class="kvm-pill expired">Expired (<?php echo esc_html($exp_display); ?>)</span>
                                 <?php else : ?>
-                                    <span class="kvm-date-text"><?php echo $exp_display; ?></span>
+                                    <span class="kvm-date-text"><?php echo esc_html($exp_display); ?></span>
                                 <?php endif; ?>
                             </td>
                             <td>
-                                <strong class="kvm-status-text <?php echo ($l->status === 'active' && (!$is_expired || $is_grace) ? ($is_grace ? 'grace' : 'active') : 'revoked'); ?>">
-                                    <?php echo $is_grace ? 'GRACE PERIOD' : strtoupper(esc_html($l->status)); ?>
+                                <strong class="kvm-status-text <?php echo esc_attr(($l->status === 'active' && (!$is_expired || $is_grace)) ? ($is_grace ? 'grace' : 'active') : 'revoked'); ?>">
+                                    <?php echo esc_html($status_label); ?>
                                 </strong>
                             </td>
-                            <td>
-                                <button type="button" class="button button-small kvm-btn-action" data-modal="kvm_view_details_<?php echo $l->id; ?>">
-                                    👁️ View Details
-                                </button>
-
-                                <div id="kvm_view_details_<?php echo $l->id; ?>" class="kvm-modal-overlay" style="display:none;">
-                                    <div class="kvm-modal-box">
-                                        <div class="kvm-modal-header">
-                                            <h3 class="kvm-modal-title">License Management &amp; Connected Domains</h3>
-                                            <button type="button" class="kvm-modal-close" data-close="kvm_view_details_<?php echo $l->id; ?>">&times;</button>
-                                        </div>
-
-                                        <div class="kvm-modal-info-card">
-                                            <p class="kvm-modal-p"><strong>License Key:</strong> <code class="kvm-code"><?php echo esc_html($l->license_key); ?></code></p>
-                                            <p class="kvm-modal-p"><strong>Customer:</strong> <?php echo esc_html($l->customer_name); ?> (<?php echo esc_html($l->customer_email); ?>)</p>
-                                            <p class="kvm-modal-p"><strong>Plan Tier:</strong> <?php echo esc_html($plan_tier); ?> (<?php echo esc_html($license_mode); ?> mode)</p>
-                                            <p class="kvm-modal-p"><strong>Quota:</strong> <?php echo count($acts); ?> used / <?php echo esc_html($l->max_activations); ?> max slots</p>
-                                            <p class="kvm-modal-p last"><strong>Expiration:</strong> <?php echo $exp_display; ?></p>
-                                        </div>
-
-                                        <div class="kvm-modal-actions-bar">
-                                            <span class="kvm-action-label">Key Actions:</span>
-                                            <div class="kvm-action-btns">
-                                                <button type="button" class="button button-small kvm-modal-sub-trigger" data-modal="kvm_edit_exp_<?php echo $l->id; ?>">
-                                                    📅 Edit Expiry
-                                                </button>
-                                                <?php if ($l->status === 'active') : ?>
-                                                    <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=keyvault-manager&action=revoke&id=' . $l->id), 'revoke_key_' . $l->id)); ?>" class="button button-small kvm-revoke-btn" onclick="return confirm('Revoke this key?');">Revoke Key</a>
-                                                <?php else : ?>
-                                                    <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=keyvault-manager&action=activate&id=' . $l->id), 'activate_key_' . $l->id)); ?>" class="button button-small kvm-activate-btn">Set Active</a>
-                                                <?php endif; ?>
-                                            </div>
-                                        </div>
-
-                                        <h4 class="kvm-domains-heading">Connected Websites / Domains (<?php echo count($acts); ?>)</h4>
-                                        <div class="kvm-domains-list">
-                                            <?php if (empty($acts)) : ?>
-                                                <p class="kvm-no-domains">No websites currently activated with this license key.</p>
-                                            <?php else : ?>
-                                                <?php foreach ($acts as $a) : 
-                                                    $unlink_url = wp_nonce_url(admin_url('admin.php?page=keyvault-manager&action=admin_unlink_instant&act_id=' . $a->id), 'admin_unlink_' . $a->id);
-                                                ?>
-                                                    <div class="kvm-domain-row">
-                                                        <code class="kvm-domain-code"><?php echo esc_html($a->domain); ?></code>
-                                                        <a href="<?php echo esc_url($unlink_url); ?>" class="kvm-unlink-link" onclick="return confirm('Unlink domain <?php echo esc_js($a->domain); ?>?');">&times; Unlink</a>
-                                                    </div>
-                                                <?php endforeach; ?>
-                                            <?php endif; ?>
-                                        </div>
-
-                                        <div class="kvm-modal-footer">
-                                            <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=keyvault-manager&action=delete_key&id=' . $l->id), 'delete_key_' . $l->id)); ?>" class="button kvm-delete-key-btn" onclick="return confirm('Are you sure you want to delete this key permanently?');">Delete Key Permanently</a>
-                                            <button type="button" class="button button-primary kvm-modal-close-btn" data-close="kvm_view_details_<?php echo $l->id; ?>">Close</button>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div id="kvm_edit_exp_<?php echo $l->id; ?>" class="kvm-modal-overlay" style="display:none;">
-                                    <div class="kvm-modal-box compact">
-                                        <div class="kvm-modal-header">
-                                            <h3 class="kvm-modal-title">Edit Expiration Date</h3>
-                                            <button type="button" class="kvm-modal-close" data-close="kvm_edit_exp_<?php echo $l->id; ?>">&times;</button>
-                                        </div>
-                                        <p class="kvm-modal-sub">License Key: <code class="kvm-code"><?php echo esc_html($l->license_key); ?></code></p>
-                                        
-                                        <form method="post" action="">
-                                            <?php wp_nonce_field('kvm_update_expiry_action', 'kvm_update_expiry_nonce'); ?>
-                                            <input type="hidden" name="license_id" value="<?php echo $l->id; ?>">
-                                            
-                                            <div class="kvm-form-group">
-                                                <label class="kvm-form-label">Expiration Rule:</label>
-                                                <select name="expiry_type" class="kvm-select kvm-expiry-rule-select" data-target="kvm_modal_date_wrap_<?php echo $l->id; ?>">
-                                                    <option value="extend_1y">Extend by +1 Year</option>
-                                                    <option value="lifetime">Set to Lifetime (No Expiry)</option>
-                                                    <option value="custom">Set Specific Custom Date</option>
-                                                </select>
-                                            </div>
-
-                                            <div id="kvm_modal_date_wrap_<?php echo $l->id; ?>" class="kvm-form-group" style="display:none;">
-                                                <label class="kvm-form-label">Specific Expiration Date:</label>
-                                                <input type="date" name="custom_expiry_date" class="kvm-input" value="<?php echo $l->expires_at ? date('Y-m-d', strtotime($l->expires_at)) : ''; ?>">
-                                            </div>
-
-                                            <div class="kvm-modal-footer right">
-                                                <button type="button" class="button kvm-modal-close-btn" data-close="kvm_edit_exp_<?php echo $l->id; ?>">Cancel</button>
-                                                <button type="submit" name="kvm_update_expiry" class="kvm-btn-submit compact">Save Expiry</button>
-                                            </div>
-                                        </form>
-                                    </div>
-                                </div>
+                            <td class="col-actions">
+                                <button type="button" class="button button-small kvm-btn-action" data-kvm-details>👁️ View Details</button>
                             </td>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
             </tbody>
         </table>
-
-        <?php if ($total_pages > 1) : ?>
-            <div class="kvm-pagination-wrap">
-                <div class="kvm-pagination-info">
-                    Showing <?php echo ($offset + 1); ?> &ndash; <?php echo min($offset + $per_page, $total_items); ?> of <?php echo $total_items; ?> license keys
-                </div>
-                <div class="kvm-pagination-links">
-                    <?php
-                    $base_url = admin_url('admin.php?page=keyvault-manager');
-                    if (!empty($search)) {
-                        $base_url = add_query_arg('s', urlencode($search), $base_url);
-                    }
-
-                    if ($current_page > 1) {
-                        echo '<a href="' . esc_url(add_query_arg('paged', $current_page - 1, $base_url)) . '" class="button prev">&laquo; Previous</a>';
-                    }
-
-                    for ($p = 1; $p <= $total_pages; $p++) {
-                        if ($p == $current_page) {
-                            echo '<span class="button disabled active">' . $p . '</span>';
-                        } elseif ($p <= 3 || $p >= $total_pages - 2 || abs($p - $current_page) <= 1) {
-                            echo '<a href="' . esc_url(add_query_arg('paged', $p, $base_url)) . '" class="button">' . $p . '</a>';
-                        } elseif ($p == 4 || $p == $total_pages - 3) {
-                            echo '<span class="dots">...</span>';
-                        }
-                    }
-
-                    if ($current_page < $total_pages) {
-                        echo '<a href="' . esc_url(add_query_arg('paged', $current_page + 1, $base_url)) . '" class="button next">Next &raquo;</a>';
-                    }
-                    ?>
-                </div>
-            </div>
-        <?php endif; ?>
+        </div>
     </form>
+
+    <?php if ($total_pages > 1) :
+        $base_url = admin_url('admin.php?page=keyvault-manager&tab=licenses');
+        if (!empty($search)) {
+            $base_url = add_query_arg('s', urlencode($search), $base_url);
+        }
+        ?>
+        <div class="kvm-pagination-wrap">
+            <div class="kvm-pagination-info">
+                Showing <?php echo intval($offset + 1); ?> &ndash; <?php echo intval(min($offset + $per_page, $total_items)); ?> of <?php echo intval($total_items); ?> license keys
+            </div>
+            <div class="kvm-pagination-links">
+                <?php
+                if ($current_page > 1) {
+                    echo '<a href="' . esc_url(add_query_arg('paged', $current_page - 1, $base_url)) . '" class="button prev">&laquo; Previous</a>';
+                }
+                for ($p = 1; $p <= $total_pages; $p++) {
+                    if ($p === $current_page) {
+                        echo '<span class="button disabled active">' . intval($p) . '</span>';
+                    } elseif ($p <= 3 || $p >= $total_pages - 2 || abs($p - $current_page) <= 1) {
+                        echo '<a href="' . esc_url(add_query_arg('paged', $p, $base_url)) . '" class="button">' . intval($p) . '</a>';
+                    } elseif ($p === 4 || $p === $total_pages - 3) {
+                        echo '<span class="dots">…</span>';
+                    }
+                }
+                if ($current_page < $total_pages) {
+                    echo '<a href="' . esc_url(add_query_arg('paged', $current_page + 1, $base_url)) . '" class="button next">Next &raquo;</a>';
+                }
+                ?>
+            </div>
+        </div>
+    <?php endif; ?>
 </div>
