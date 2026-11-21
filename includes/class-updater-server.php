@@ -20,6 +20,7 @@ class KeyVault_Manager_Updater_Server {
 
     private function __construct() {
         add_action('rest_api_init', array($this, 'register_routes'));
+        add_action('kvm_daily_maintenance', array('KeyVault_Manager_Updater_Server', 'purge_download_tokens'));
     }
 
     public function register_routes() {
@@ -104,38 +105,94 @@ class KeyVault_Manager_Updater_Server {
         }
 
         if (preg_match('#^https?://#i', $zip_setting)) {
-            // Remote source — proxy the download through the hub so the URL stays gated.
             $response = wp_remote_get($zip_setting, array('timeout' => 120));
             if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
                 return new WP_REST_Response(array('success' => false, 'message' => 'Unable to read the configured package URL.'), 404);
             }
-            $body     = wp_remote_retrieve_body($response);
-            $filename = basename(parse_url($zip_setting, PHP_URL_PATH));
-            if ($filename === '' || substr($filename, -4) !== '.zip') {
-                $filename = 'client-plugin.zip';
-            }
-            nocache_headers();
-            header('Content-Type: application/zip');
-            header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
-            header('Content-Length: ' . strlen($body));
-            echo $body; // phpcs:ignore WordPress.Security.EscapeOutput -- binary file stream.
-            exit;
+            self::stream_body(wp_remote_retrieve_body($response), $zip_setting);
         }
 
         $file = wp_normalize_path($zip_setting);
         if (substr($file, -4) !== '.zip' || !file_exists($file)) {
             return new WP_REST_Response(array('success' => false, 'message' => 'Configured package file was not found on the server.'), 404);
         }
+        self::stream_body(null, $file);
+    }
 
-        $filename = basename($file);
-        nocache_headers();
-        header('Content-Type: application/zip');
-        header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
-        header('Content-Length: ' . filesize($file));
+    /**
+     * Stream the configured package to the browser (shared by the REST route
+     * and the one-time portal token flow). Exits after streaming.
+     */
+    public static function stream_package() {
+        $zip_setting = trim((string) KeyVault_Manager_DB::opt('zip_file_path', ''));
+        if ($zip_setting === '') {
+            wp_die(esc_html__('No client package is configured on this server yet. Please contact support.', 'cdf'), 404);
+        }
+
+        if (preg_match('#^https?://#i', $zip_setting)) {
+            $response = wp_remote_get($zip_setting, array('timeout' => 120));
+            if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+                wp_die(esc_html__('The client package could not be read. Please try again shortly.', 'cdf'), 404);
+            }
+            self::stream_body(wp_remote_retrieve_body($response), $zip_setting);
+        }
+
+        $file = wp_normalize_path($zip_setting);
+        if (substr($file, -4) !== '.zip' || !file_exists($file)) {
+            wp_die(esc_html__('The client package file was not found on this server. Please contact support.', 'cdf'), 404);
+        }
+        self::stream_body(null, $file);
+    }
+
+    /**
+     * Send ZIP headers and stream. $body of null streams from $source path.
+     */
+    private static function stream_body($body, $source) {
+        if ($body === null) {
+            $filename = basename($source);
+            $length   = filesize($source);
+        } else {
+            $filename = basename(parse_url($source, PHP_URL_PATH));
+            $length   = strlen($body);
+        }
+        if ($filename === '' || substr($filename, -4) !== '.zip') {
+            $filename = 'client-plugin.zip';
+        }
+
         if (ob_get_level()) {
             ob_end_clean();
         }
-        readfile($file); // phpcs:ignore WordPress.WP.AlternativeFunctions -- streaming a binary asset.
+        nocache_headers();
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
+        header('Content-Length: ' . $length);
+
+        if ($body === null) {
+            readfile($source); // phpcs:ignore WordPress.WP.AlternativeFunctions -- streaming a binary asset.
+        } else {
+            echo $body; // phpcs:ignore WordPress.Security.EscapeOutput -- binary file stream.
+        }
         exit;
+    }
+
+    /**
+     * Daily cron: purge expired one-time download tokens. Token rows are
+     * small in number (minting is throttled and tokens expire in minutes),
+     * so a PHP-side sweep is safe and exact.
+     */
+    public static function purge_download_tokens() {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE '" . $wpdb->esc_like('_kvm_dl_') . "%'"
+        );
+        if (empty($rows)) {
+            return;
+        }
+        foreach ($rows as $row) {
+            $data = json_decode($row->option_value, true);
+            if (!is_array($data) || empty($data['exp']) || intval($data['exp']) < time()) {
+                delete_option($row->option_name);
+            }
+        }
     }
 }

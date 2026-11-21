@@ -68,7 +68,8 @@ $wpdb->query(
         OR option_name LIKE '" . $wpdb->esc_like('_transient_timeout_' . $slug . '_') . "%'
         OR option_name LIKE '" . $wpdb->esc_like('_site_transient_kvm_') . "%'
         OR option_name LIKE '" . $wpdb->esc_like('_site_transient_timeout_kvm_') . "%'
-        OR option_name LIKE '" . $wpdb->esc_like('_kvm_claim_') . "%'"
+        OR option_name LIKE '" . $wpdb->esc_like('_kvm_claim_') . "%'
+        OR option_name LIKE '" . $wpdb->esc_like('_kvm_dl_') . "%'"
 );
 
 /* 5. Clear scheduled events. */
